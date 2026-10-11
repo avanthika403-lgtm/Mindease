@@ -1,0 +1,29 @@
+{
+  "name": "mind-ease",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A private, self-guided mental wellness application",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "check": "node --check server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "connect-pg-simple": "^10.0.0",
+    "csrf-sync": "^4.2.1",
+    "dotenv": "^16.4.7",
+    "ejs": "^3.1.10",
+    "express": "^5.1.0",
+    "express-rate-limit": "^7.5.0",
+    "express-session": "^1.18.1",
+    "helmet": "^8.1.0",
+    "otplib": "^13.5.0",
+    "pg": "^8.16.3",
+    "qrcode": "^1.5.4"
+  }
+}
