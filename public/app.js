@@ -70,8 +70,9 @@ const chatForm = document.querySelector('[data-chat-form]');
 const chatMessages = document.querySelector('[data-chat-messages]');
 const chatInput = chatForm?.querySelector('textarea');
 const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content;
+const chatHistory = [];
 
-function addChatMessage(text, sender, crisis = false) {
+function addChatMessage(text, sender, crisis = false, resources = []) {
   const wrapper = document.createElement('div');
   wrapper.className = `chat-message ${sender}${crisis ? ' crisis-message' : ''}`;
   if (sender === 'assistant') {
@@ -83,6 +84,29 @@ function addChatMessage(text, sender, crisis = false) {
   const paragraph = document.createElement('p');
   paragraph.textContent = text;
   wrapper.append(paragraph);
+  if (sender === 'assistant' && Array.isArray(resources) && resources.length) {
+    const list = document.createElement('ul');
+    list.className = 'chat-resources';
+    for (const resource of resources) {
+      if (!resource || typeof resource.label !== 'string' || typeof resource.url !== 'string') continue;
+      let url;
+      try {
+        url = new URL(resource.url);
+      } catch {
+        continue;
+      }
+      if (url.protocol !== 'https:') continue;
+      const item = document.createElement('li');
+      const link = document.createElement('a');
+      link.href = url.href;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = resource.label;
+      item.append(link);
+      list.append(item);
+    }
+    if (list.childElementCount) wrapper.append(list);
+  }
   chatMessages.append(wrapper);
   wrapper.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   return wrapper;
@@ -93,6 +117,7 @@ chatForm?.addEventListener('submit', async (event) => {
   const message = chatInput.value.trim();
   if (!message) return;
   addChatMessage(message, 'user');
+  chatHistory.push({ role: 'user', content: message });
   chatInput.value = '';
   const pending = addChatMessage('A moment…', 'assistant');
   const submitButton = chatForm.querySelector('button[type="submit"]');
@@ -101,11 +126,13 @@ chatForm?.addEventListener('submit', async (event) => {
     const response = await fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'x-csrf-token': csrfToken },
-      body: JSON.stringify({ message, _csrf: csrfToken })
+      body: JSON.stringify({ message, history: chatHistory.slice(0, -1).slice(-8), _csrf: csrfToken })
     });
     const result = await response.json();
     pending.remove();
-    addChatMessage(result.reply || 'I’m here with you. Try again in a moment.', 'assistant', result.crisis);
+    const reply = result.reply || 'I’m here with you. Try again in a moment.';
+    addChatMessage(reply, 'assistant', result.crisis, result.resources);
+    chatHistory.push({ role: 'assistant', content: reply });
   } catch {
     pending.remove();
     addChatMessage('I’m having trouble responding just now. Take a slow breath, and consider reaching out to someone you trust.', 'assistant');

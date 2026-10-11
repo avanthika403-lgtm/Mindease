@@ -249,12 +249,14 @@ h1, h2, h3 { font-family: var(--font-display); font-weight: 600; line-height: 1.
 .chat-header small { color: var(--muted); font-size: 10px; }
 .chat-status { display: flex; align-items: center; gap: 6px; margin-left: auto; color: #76827a; font-size: 10px; }
 .chat-messages { min-height: 245px; max-height: 44vh; display: flex; flex-direction: column; gap: 13px; overflow: auto; padding: 20px; }
-.chat-message { max-width: 83%; display: flex; align-items: flex-start; gap: 9px; animation: rise-in .2s ease both; }
+.chat-message { max-width: 83%; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 9px; animation: rise-in .2s ease both; }
 .chat-message p { margin: 0; padding: 11px 13px; color: #536258; background: #eef1e9; font-size: 12px; line-height: 1.65; white-space: pre-wrap; }
 .chat-message.user { align-self: flex-end; }
 .chat-message.user p { color: white; background: var(--forest); }
 .chat-message-mark { flex: 0 0 24px; display: grid; place-items: center; width: 24px; height: 24px; color: var(--leaf); background: #edf0e8; font-size: 12px; }
 .chat-message.crisis-message p { color: #71352e; background: #f7e9e4; }
+.chat-resources { flex-basis: 100%; margin: 0 0 0 33px; padding-left: 16px; color: var(--forest); font-size: 11px; line-height: 1.8; }
+.chat-resources a { color: var(--forest); text-decoration: underline; text-underline-offset: 2px; }
 .prompt-row { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 18px 13px; }
 .prompt-row button { min-height: 30px; padding: 4px 10px; border: 1px solid #d8ddd4; border-radius: 2px; color: #5e6c62; background: transparent; font-size: 10px; cursor: pointer; }
 .prompt-row button:hover { border-color: var(--leaf); background: #f3f5ef; }

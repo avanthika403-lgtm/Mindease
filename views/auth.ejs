@@ -27,7 +27,6 @@
         <% if (mode === 'register') { %><label for="name">Your name<input id="name" name="name" autocomplete="name" maxlength="80" required></label><% } %>
         <label for="email">Email address<input id="email" name="email" type="email" autocomplete="email" maxlength="254" required></label>
         <label for="password">Password<input id="password" name="password" type="password" autocomplete="<%= mode === 'register' ? 'new-password' : 'current-password' %>" minlength="<%= mode === 'register' ? '10' : '1' %>" required><% if (mode === 'register') { %><span class="field-hint">Use at least 10 characters.</span><% } %></label>
-        <% if (mode === 'login') { %><label for="totp">Authenticator code <span class="optional">If two-step sign-in is enabled</span><input id="totp" name="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6"></label><% } %>
         <button class="button button-dark button-wide" type="submit"><%= mode === 'register' ? 'Create your account' : 'Sign in securely' %> <span aria-hidden="true">↗</span></button>
       </form>
       <p class="auth-switch"><%= mode === 'register' ? 'Already have an account?' : 'New to Mind Ease?' %> <a href="/<%= mode === 'register' ? 'login' : 'register' %>"><%= mode === 'register' ? 'Log in' : 'Create an account' %></a></p>

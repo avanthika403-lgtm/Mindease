@@ -4,25 +4,72 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 const express = require('express');
 const session = require('express-session');
+const cookieParser = require('cookie-parser');
+const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const helmet = require('helmet');
 const { rateLimit } = require('express-rate-limit');
 const { Pool } = require('pg');
 const { csrfSync } = require('csrf-sync');
-const { generateSecret, generateURI, verify } = require('otplib');
-const QRCode = require('qrcode');
+const { retrieveWellnessResources } = require('./usha-knowledge');
+const { createAuthRouter } = require('./routes/auth');
+const { createWellnessRouter } = require('./routes/wellness');
+const { createSettingsRouter } = require('./routes/settings');
+const { createPagesRouter } = require('./routes/pages');
 
 const app = express();
 const port = Number(process.env.PORT) || 3000;
-if ((process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) || ((process.env.NODE_ENV === 'production' || process.env.DATABASE_URL) && !process.env.DATA_ENCRYPTION_KEY)) {
+const databaseUrl = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL;
+const jwtSecret = process.env.JWT_SECRET || process.env.SESSION_SECRET || 'mind-ease-jwt-secret-key-development';
+
+if ((process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) || ((process.env.NODE_ENV === 'production' || databaseUrl) && !process.env.DATA_ENCRYPTION_KEY)) {
   throw new Error('Set SESSION_SECRET in production and DATA_ENCRYPTION_KEY whenever PostgreSQL or production mode is enabled.');
 }
-const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined }) : null;
+
+const pool = databaseUrl ? new Pool({ connectionString: databaseUrl, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined }) : null;
 const demo = { users: [], moods: [], diaries: [] };
 const encryptionKey = crypto.createHash('sha256').update(process.env.DATA_ENCRYPTION_KEY || 'local-demo-encryption-key-change-before-deployment').digest();
+
 const { generateToken, csrfSynchronisedProtection } = csrfSync({
   getTokenFromRequest: (req) => req.headers['x-csrf-token'] || req.body?._csrf
 });
+
+function signUserToken(user) {
+  return jwt.sign(
+    {
+      id: user.id,
+      name: user.name,
+      email: user.email
+    },
+    jwtSecret,
+    { expiresIn: '7d' }
+  );
+}
+
+function verifyUserToken(token) {
+  try {
+    return jwt.verify(token, jwtSecret);
+  } catch {
+    return null;
+  }
+}
+
+function setAuthCookie(res, token) {
+  res.cookie('token', token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+  });
+}
+
+function clearAuthCookie(res) {
+  res.clearCookie('token', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax'
+  });
+}
 
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
@@ -34,6 +81,7 @@ app.use(helmet({ contentSecurityPolicy: { directives: {
   imgSrc: ["'self'", 'data:', 'https://images.unsplash.com'],
   connectSrc: ["'self'"]
 } } }));
+app.use(cookieParser());
 app.use(express.json({ limit: '20kb' }));
 app.use(express.urlencoded({ extended: false, limit: '20kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -45,23 +93,160 @@ app.use(session({
   cookie: { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 1000 * 60 * 60 * 24 * 7 },
   ...(pool ? { store: new (require('connect-pg-simple')(session))({ pool, createTableIfMissing: true }) } : {})
 }));
+
 app.use((req, res, next) => {
   res.locals.csrfToken = generateToken(req);
   next();
 });
-app.use(csrfSynchronisedProtection);
+
+// Enforce CSRF protection on browser form submissions while allowing Bearer token API calls
 app.use((req, res, next) => {
-  res.locals.user = req.session.user || null;
-  res.locals.flash = req.session.flash || null;
-  delete req.session.flash;
-  res.locals.totpSetup = null;
+  if (req.headers.authorization && req.headers.authorization.toLowerCase().startsWith('bearer ')) {
+    return next();
+  }
+  return csrfSynchronisedProtection(req, res, next);
+});
+
+// JWT authentication extractor & user session synchronization
+app.use((req, res, next) => {
+  let token = req.cookies?.token;
+  if (!token && req.headers.authorization) {
+    const parts = req.headers.authorization.split(' ');
+    if (parts.length === 2 && parts[0].toLowerCase() === 'bearer') {
+      token = parts[1];
+    }
+  }
+
+  if (token) {
+    const decoded = verifyUserToken(token);
+    if (decoded) {
+      req.user = decoded;
+      if (req.session) {
+        req.session.user = decoded;
+      }
+    } else {
+      req.user = null;
+      if (req.session) delete req.session.user;
+      clearAuthCookie(res);
+    }
+  } else if (req.session?.user) {
+    req.user = req.session.user;
+  } else {
+    req.user = null;
+  }
+
+  res.locals.user = req.user;
+  res.locals.flash = req.session?.flash || null;
+  if (req.session) delete req.session.flash;
   res.locals.currentPath = req.path;
   res.locals.demoMode = !pool;
+  res.locals.supabaseAuthConfigured = false;
   next();
 });
 
 const crisisPattern = /\b(suicid(?:e|al)|kill myself|end my life|self[- ]harm|hurt myself|want to die|better off dead)\b/i;
 const crisisMessage = 'If you may act on these thoughts, call emergency services now or go to the nearest emergency department. In the U.S. or Canada, call or text 988. In India, call Tele-MANAS at 14416. If you are elsewhere, contact your local crisis line. If you can, tell someone you trust and stay with them.';
+const crisisResources = [
+  { label: 'U.S. & Canada: call or text 988', url: 'https://988lifeline.org/' },
+  { label: 'Find a crisis line in your country', url: 'https://findahelpline.com/' },
+  { label: 'India: Tele-MANAS', url: 'https://telemanas.mohfw.gov.in/' }
+];
+const professionalHelpPattern = /\b(therap(?:y|ist)|counsel(?:ing|lor|or)|psychologist|psychiatrist|professional help|mental health service)\b/i;
+
+const chatLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 15,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { reply: 'You’ve sent several messages in a short time. Take a moment, then try again.', crisis: false }
+});
+
+function getChatHistory(history) {
+  if (!Array.isArray(history)) return [];
+  return history.slice(-8).flatMap((item) => {
+    if (!item || !['user', 'assistant'].includes(item.role) || typeof item.content !== 'string') return [];
+    const content = item.content.trim().slice(0, 2000);
+    return content ? [{ role: item.role, content }] : [];
+  });
+}
+
+async function getUshaReply(message, history, retrievedResources) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) {
+    return 'I’m here with you. What feels most important about this right now? You might also try naming one small thing you need in this moment.';
+  }
+
+  const resourceContext = retrievedResources.length
+    ? retrievedResources.map((item) => `${item.title}: ${item.guidance} Source: ${item.url}`).join('\n')
+    : 'No specific external resource matched. Rely on Mind Ease CBT and self-care principles.';
+
+  const systemPrompt = [
+    'You are USHA, the warm, empathetic, and compassionate AI mental wellness companion within Mind Ease.',
+    '',
+    'ABOUT THE MIND EASE PROJECT & OUR MISSION:',
+    'Mind Ease is a web-based, private, and stigma-free mental wellness platform designed to help users manage everyday stress, anxiety, overwhelm, and negative thoughts.',
+    'Our core goals are:',
+    '1. Accessibility & Privacy: Provide an immediate, safe, judgment-free space to reflect and breathe, especially when professional therapy is expensive, waitlisted, or intimidating.',
+    '2. Cognitive Behavioral Therapy (CBT): Help users recognize automatic negative thoughts (ANTs) and cognitive distortions (such as catastrophizing, all-or-nothing thinking, emotional reasoning, and mind-reading), and guide them to find balanced, kinder, and realistic perspectives.',
+    '3. Mindful Tracking: Encourage users to build emotional self-awareness by connecting their mood scores with daily habits (like screen time, sleep, and lifestyle stressors).',
+    '4. Somatic & Body-Based Regulation: Provide quick somatic calming tools (4-7-8 rhythmic breathing and 5-4-3-2-1 sensory grounding) to soothe nervous system activation.',
+    '',
+    'HOW YOU GUIDE AND MAKE SUGGESTIONS:',
+    '- Empathy First: Always listen, validate feelings warmly, and meet the user where they are. Never invalidate their experience or rush to "fix" their problems without understanding.',
+    '- In-App Mind Ease Tools (Suggest these gently when relevant):',
+    '  * Thought Diary (/diary): Suggest writing down situations, automatic thoughts, feelings, evidence for/against, and crafting a balanced thought when stuck in worry or self-criticism.',
+    '  * Mood Check-in (/mood): Suggest rating their daily mood (1-10) and noting screen time or sleep to observe patterns over time without self-judgment.',
+    '  * A Moment of Care (/care): Recommend trying the 4-7-8 breathing exercise or 5-4-3-2-1 sensory grounding practice when feeling physically tense, restless, or panicked.',
+    '- Actionable Everyday Suggestions: Suggest 1 or 2 small, realistic micro-steps (e.g. taking a sip of water, unclenching the jaw and dropping the shoulders, stepping away from screens for a few minutes, taking a short stroll, or connecting with a supportive friend).',
+    '- Boundaries & Ethics: You are a supportive self-help tool, not a doctor, licensed therapist, or medical diagnostic system. Never diagnose psychiatric conditions or prescribe medication. If someone expresses acute crisis, self-harm, or despair, warmly guide them toward emergency services (988 in US/Canada, Tele-MANAS 14416 in India, 112) or trusted loved ones.',
+    '- Tone & Structure: Conversational, gentle, soothing, and concise (2-4 brief paragraphs or clean bullet points). Avoid overwhelming walls of text. End with a thoughtful, open reflection question.',
+    '',
+    'TRUSTED REFERENCE CONTEXT:',
+    resourceContext
+  ].join('\n');
+
+  const contents = [
+    ...history.map((item) => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content })),
+    { role: 'user', content: message }
+  ];
+
+  const candidateModels = [
+    process.env.GROQ_MODEL,
+    'openai/gpt-oss-120b',
+    'qwen/qwen3.8-27b'
+  ].filter(Boolean);
+
+  let lastError = null;
+  for (const model of candidateModels) {
+    try {
+      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(20000),
+        body: JSON.stringify({
+          model,
+          temperature: 0.6,
+          max_tokens: 800,
+          messages: [{ role: 'system', content: systemPrompt }, ...contents]
+        })
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => ({}));
+        throw new Error(errorBody.error?.message || `Groq returned HTTP ${response.status}`);
+      }
+
+      const result = await response.json();
+      const reply = result.choices?.[0]?.message?.content?.trim();
+      if (reply) return reply.slice(0, 4000);
+    } catch (err) {
+      lastError = err;
+      console.warn(`Groq request with model ${model} failed: ${err.message}. Trying next candidate...`);
+    }
+  }
+
+  throw lastError || new Error('Groq returned an empty response');
+}
 
 function encryptField(value) {
   const iv = crypto.randomBytes(12);
@@ -92,7 +277,13 @@ async function query(text, values = []) {
 }
 
 function requireAuth(req, res, next) {
-  if (!req.session.user) return res.redirect('/login');
+  const user = req.user || req.session?.user;
+  if (!user) {
+    if (req.xhr || req.headers.accept?.includes('application/json')) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    return res.redirect('/login');
+  }
   next();
 }
 
@@ -100,11 +291,26 @@ function setFlash(req, type, message) {
   req.session.flash = { type, message };
 }
 
-function establishSession(req, res, next, user) {
+function establishAuthSession(req, res, next, user) {
+  const userPayload = {
+    id: user.id,
+    name: user.name,
+    email: user.email
+  };
+  const token = signUserToken(userPayload);
+  setAuthCookie(res, token);
+  req.user = userPayload;
+
   req.session.regenerate((error) => {
     if (error) return next(error);
-    req.session.user = user;
-    req.session.save((saveError) => saveError ? next(saveError) : res.redirect('/dashboard'));
+    req.session.user = userPayload;
+    req.session.save((saveError) => {
+      if (saveError) return next(saveError);
+      if (req.xhr || req.headers.accept?.includes('application/json')) {
+        return res.json({ success: true, token, user: userPayload, redirectUrl: '/dashboard' });
+      }
+      return res.redirect('/dashboard');
+    });
   });
 }
 
@@ -123,274 +329,55 @@ async function getUserData(userId) {
 }
 
 function renderPage(req, res, page, extras = {}) {
-  res.render('app', { page, totpSetup: null, ...extras });
+  res.render('app', { page, ...extras });
 }
 
-app.get('/', (req, res) => {
-  if (req.session.user) return res.redirect('/dashboard');
-  res.render('home');
-});
+app.use('/', createAuthRouter({
+  pool,
+  establishAuthSession,
+  requireAuth,
+  demo,
+  bcrypt,
+  crypto,
+  setFlash,
+  clearAuthCookie
+}));
 
-app.get('/register', (req, res) => res.render('auth', { mode: 'register' }));
-app.get('/login', (req, res) => res.render('auth', { mode: 'login' }));
+app.use('/', createWellnessRouter({
+  requireAuth,
+  getUserData,
+  renderPage,
+  setFlash,
+  pool,
+  query,
+  encryptField,
+  demo,
+  crypto,
+  chatLimiter,
+  crisisPattern,
+  crisisMessage,
+  crisisResources,
+  getChatHistory,
+  professionalHelpPattern,
+  retrieveWellnessResources,
+  groqConfigured: Boolean(process.env.GROQ_API_KEY),
+  getUshaReply
+}));
 
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false, message: 'Too many attempts. Please wait a few minutes and try again.' });
+app.use('/', createSettingsRouter({
+  requireAuth,
+  renderPage,
+  setFlash,
+  pool,
+  query,
+  demo,
+  bcrypt,
+  signUserToken,
+  setAuthCookie,
+  clearAuthCookie
+}));
 
-app.post('/register', authLimiter, async (req, res, next) => {
-  try {
-    const name = String(req.body.name || '').trim().slice(0, 80);
-    const email = String(req.body.email || '').trim().toLowerCase().slice(0, 254);
-    const password = String(req.body.password || '');
-    if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 10) {
-      setFlash(req, 'error', 'Add your name, a valid email, and a password with at least 10 characters.');
-      return res.redirect('/register');
-    }
-    const passwordHash = await bcrypt.hash(password, 12);
-    let user;
-    if (pool) {
-      const result = await query('INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3) RETURNING id, name, email', [name, email, passwordHash]);
-      user = result.rows[0];
-    } else {
-      if (demo.users.some((item) => item.email === email)) {
-        setFlash(req, 'error', 'An account with that email already exists.');
-        return res.redirect('/register');
-      }
-      user = { id: crypto.randomUUID(), name, email, password_hash: passwordHash, totp_enabled: false, totp_secret: null };
-      demo.users.push(user);
-    }
-    establishSession(req, res, next, { id: user.id, name: user.name, email: user.email, totpEnabled: false });
-  } catch (error) {
-    if (error.code === '23505') {
-      setFlash(req, 'error', 'An account with that email already exists.');
-      return res.redirect('/register');
-    }
-    next(error);
-  }
-});
-
-app.post('/login', authLimiter, async (req, res, next) => {
-  try {
-    const email = String(req.body.email || '').trim().toLowerCase();
-    const password = String(req.body.password || '');
-    const user = pool
-      ? (await query('SELECT id, name, email, password_hash, totp_secret, totp_enabled FROM users WHERE email = $1', [email])).rows[0]
-      : demo.users.find((item) => item.email === email);
-    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-      setFlash(req, 'error', 'That email and password combination was not recognized.');
-      return res.redirect('/login');
-    }
-    if (user.totp_enabled) {
-      const result = await verify({ secret: decryptField(user.totp_secret), token: String(req.body.totp || '').trim() });
-      if (!result.valid) {
-        setFlash(req, 'error', 'Enter a valid authenticator code to finish signing in.');
-        return res.redirect('/login');
-      }
-    }
-    establishSession(req, res, next, { id: user.id, name: user.name, email: user.email, totpEnabled: Boolean(user.totp_enabled) });
-  } catch (error) { next(error); }
-});
-
-app.post('/logout', requireAuth, (req, res) => req.session.destroy(() => res.redirect('/')));
-
-app.get('/dashboard', requireAuth, async (req, res, next) => {
-  try {
-    const data = await getUserData(req.session.user.id);
-    const today = new Date().toISOString().slice(0, 10);
-    const todayMood = data.moods.find((entry) => String(entry.entry_date).slice(0, 10) === today);
-    renderPage(req, res, 'dashboard', { ...data, todayMood });
-  } catch (error) { next(error); }
-});
-
-app.get('/mood', requireAuth, async (req, res, next) => {
-  try { renderPage(req, res, 'mood', await getUserData(req.session.user.id)); }
-  catch (error) { next(error); }
-});
-
-app.post('/mood', requireAuth, async (req, res, next) => {
-  try {
-    const score = Number(req.body.score);
-    const screenMinutes = Number(req.body.screen_minutes || 0);
-    const note = String(req.body.note || '').trim().slice(0, 500);
-    const entryDate = String(req.body.entry_date || new Date().toISOString().slice(0, 10));
-    if (!Number.isInteger(score) || score < 1 || score > 10 || !Number.isInteger(screenMinutes) || screenMinutes < 0 || screenMinutes > 1440 || !/^\d{4}-\d{2}-\d{2}$/.test(entryDate)) {
-      setFlash(req, 'error', 'Check the mood, screen time, and date fields.');
-      return res.redirect('/mood');
-    }
-    if (pool) await query('INSERT INTO mood_entries (user_id, score, note, screen_minutes, entry_date) VALUES ($1, $2, $3, $4, $5)', [req.session.user.id, encryptField(score), encryptField(note), encryptField(screenMinutes), entryDate]);
-    else demo.moods.push({ id: crypto.randomUUID(), user_id: req.session.user.id, score: encryptField(score), note: encryptField(note), screen_minutes: encryptField(screenMinutes), entry_date: entryDate, created_at: new Date().toISOString() });
-    setFlash(req, 'success', 'Mood saved. Thank you for checking in.');
-    res.redirect('/mood');
-  } catch (error) { next(error); }
-});
-
-app.get('/diary', requireAuth, async (req, res, next) => {
-  try { renderPage(req, res, 'diary', await getUserData(req.session.user.id)); }
-  catch (error) { next(error); }
-});
-
-app.post('/diary', requireAuth, async (req, res, next) => {
-  try {
-    const fields = ['situation', 'thought', 'feeling', 'evidence_for', 'evidence_against', 'balanced_thought'];
-    const entry = Object.fromEntries(fields.map((field) => [field, String(req.body[field] || '').trim().slice(0, 1800)]));
-    if (fields.filter((field) => !['evidence_for', 'evidence_against'].includes(field)).some((field) => !entry[field])) {
-      setFlash(req, 'error', 'Complete the situation, thought, feeling, and balanced-thought fields.');
-      return res.redirect('/diary');
-    }
-    const encryptedEntry = fields.map((field) => encryptField(entry[field]));
-    if (pool) await query('INSERT INTO diary_entries (user_id, situation, thought, feeling, evidence_for, evidence_against, balanced_thought) VALUES ($1, $2, $3, $4, $5, $6, $7)', [req.session.user.id, ...encryptedEntry]);
-    else demo.diaries.push({ id: crypto.randomUUID(), user_id: req.session.user.id, ...Object.fromEntries(fields.map((field, index) => [field, encryptedEntry[index]])), created_at: new Date().toISOString() });
-    setFlash(req, 'success', 'Your reflection has been saved privately.');
-    res.redirect('/diary');
-  } catch (error) { next(error); }
-});
-
-app.get('/chat', requireAuth, (req, res) => renderPage(req, res, 'chat'));
-
-app.post('/chat', requireAuth, async (req, res) => {
-  const message = String(req.body.message || '').trim().slice(0, 2000);
-  if (!message) return res.json({ reply: 'Share as much or as little as feels right.', crisis: false });
-  if (crisisPattern.test(message)) return res.json({ reply: crisisMessage, crisis: true });
-  if (!process.env.GEMINI_API_KEY) return res.json({ reply: 'I’m here with you. What feels most important about this right now? You might also try naming one small thing you need in this moment.', crisis: false });
-  try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(process.env.GEMINI_MODEL || 'gemini-2.5-flash')}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ system_instruction: { parts: [{ text: 'You are USHA, a warm and careful self-help companion, not a therapist. Listen without diagnosing, offer gentle reflective prompts and practical self-care, and encourage professional support when appropriate. Be concise. Never claim to provide emergency care. If the user may be in immediate danger, tell them to contact emergency services and a trusted person now.' }] }, contents: [{ parts: [{ text: message }] }] })
-    });
-    const result = await response.json();
-    const reply = result.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join(' ').trim();
-    res.json({ reply: response.ok && reply ? reply : 'I’m having trouble responding just now. Take a slow breath, and consider reaching out to someone you trust.', crisis: false });
-  } catch {
-    res.json({ reply: 'I’m having trouble responding just now. Take a slow breath, and consider reaching out to someone you trust.', crisis: false });
-  }
-});
-
-app.get('/care', requireAuth, (req, res) => renderPage(req, res, 'care'));
-app.get('/insights', requireAuth, async (req, res, next) => {
-  try { renderPage(req, res, 'insights', await getUserData(req.session.user.id)); }
-  catch (error) { next(error); }
-});
-app.get('/help', requireAuth, (req, res) => renderPage(req, res, 'help'));
-app.get('/settings', requireAuth, (req, res) => renderPage(req, res, 'settings'));
-
-app.post('/settings/profile', requireAuth, async (req, res, next) => {
-  try {
-    const name = String(req.body.name || '').trim().slice(0, 80);
-    const email = String(req.body.email || '').trim().toLowerCase().slice(0, 254);
-    if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      setFlash(req, 'error', 'Add a name and a valid email address.');
-      return res.redirect('/settings');
-    }
-    if (pool) await query('UPDATE users SET name = $1, email = $2 WHERE id = $3', [name, email, req.session.user.id]);
-    else {
-      const user = demo.users.find((item) => item.id === req.session.user.id);
-      if (demo.users.some((item) => item.email === email && item.id !== req.session.user.id)) {
-        setFlash(req, 'error', 'An account with that email already exists.');
-        return res.redirect('/settings');
-      }
-      user.name = name;
-      user.email = email;
-    }
-    req.session.user.name = name;
-    req.session.user.email = email;
-    setFlash(req, 'success', 'Your profile has been updated.');
-    res.redirect('/settings');
-  } catch (error) {
-    if (error.code === '23505') {
-      setFlash(req, 'error', 'An account with that email already exists.');
-      return res.redirect('/settings');
-    }
-    next(error);
-  }
-});
-
-app.post('/settings/2fa/setup', requireAuth, async (req, res, next) => {
-  try {
-    const secret = generateSecret();
-    req.session.pendingTotpSecret = secret;
-    const uri = generateURI({ issuer: 'Mind Ease', label: req.session.user.email, secret });
-    const qrData = await QRCode.toDataURL(uri, { width: 190, margin: 1 });
-    renderPage(req, res, 'settings', { totpSetup: { qrData, secret } });
-  } catch (error) { next(error); }
-});
-
-app.post('/settings/2fa/enable', requireAuth, async (req, res, next) => {
-  try {
-    const secret = req.session.pendingTotpSecret;
-    const result = secret ? await verify({ secret, token: String(req.body.totp || '').trim() }) : { valid: false };
-    if (!result.valid) {
-      setFlash(req, 'error', 'Enter the current six-digit code from your authenticator app.');
-      return res.redirect('/settings');
-    }
-    if (pool) await query('UPDATE users SET totp_secret = $1, totp_enabled = TRUE WHERE id = $2', [encryptField(secret), req.session.user.id]);
-    else {
-      const user = demo.users.find((item) => item.id === req.session.user.id);
-      user.totp_secret = encryptField(secret);
-      user.totp_enabled = true;
-    }
-    req.session.user.totpEnabled = true;
-    delete req.session.pendingTotpSecret;
-    setFlash(req, 'success', 'Two-step sign-in is now enabled.');
-    res.redirect('/settings');
-  } catch (error) { next(error); }
-});
-
-app.post('/settings/2fa/disable', requireAuth, async (req, res, next) => {
-  try {
-    const user = pool
-      ? (await query('SELECT password_hash, totp_secret FROM users WHERE id = $1', [req.session.user.id])).rows[0]
-      : demo.users.find((item) => item.id === req.session.user.id);
-    const passwordValid = user && await bcrypt.compare(String(req.body.password || ''), user.password_hash);
-    const codeResult = user?.totp_secret ? await verify({ secret: decryptField(user.totp_secret), token: String(req.body.totp || '').trim() }) : { valid: false };
-    if (!passwordValid || !codeResult.valid) {
-      setFlash(req, 'error', 'Confirm with your password and current authenticator code.');
-      return res.redirect('/settings');
-    }
-    if (pool) await query('UPDATE users SET totp_secret = NULL, totp_enabled = FALSE WHERE id = $1', [req.session.user.id]);
-    else { user.totp_secret = null; user.totp_enabled = false; }
-    req.session.user.totpEnabled = false;
-    setFlash(req, 'success', 'Two-step sign-in has been disabled.');
-    res.redirect('/settings');
-  } catch (error) { next(error); }
-});
-
-app.post('/settings/password', requireAuth, async (req, res, next) => {
-  try {
-    const current = String(req.body.current_password || '');
-    const nextPassword = String(req.body.new_password || '');
-    const user = pool
-      ? (await query('SELECT password_hash FROM users WHERE id = $1', [req.session.user.id])).rows[0]
-      : demo.users.find((item) => item.id === req.session.user.id);
-    if (!user || !(await bcrypt.compare(current, user.password_hash)) || nextPassword.length < 10) {
-      setFlash(req, 'error', 'Check your current password and use at least 10 characters for the new one.');
-      return res.redirect('/settings');
-    }
-    const hash = await bcrypt.hash(nextPassword, 12);
-    if (pool) await query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, req.session.user.id]);
-    else user.password_hash = hash;
-    setFlash(req, 'success', 'Password updated.');
-    res.redirect('/settings');
-  } catch (error) { next(error); }
-});
-
-app.post('/settings/delete', requireAuth, async (req, res, next) => {
-  try {
-    const password = String(req.body.password || '');
-    const user = pool
-      ? (await query('SELECT password_hash FROM users WHERE id = $1', [req.session.user.id])).rows[0]
-      : demo.users.find((item) => item.id === req.session.user.id);
-    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-      setFlash(req, 'error', 'Password not recognized. No data has been removed.');
-      return res.redirect('/settings');
-    }
-    if (pool) await query('DELETE FROM users WHERE id = $1', [req.session.user.id]);
-    else {
-      demo.users = demo.users.filter((item) => item.id !== req.session.user.id);
-      demo.moods = demo.moods.filter((item) => item.user_id !== req.session.user.id);
-      demo.diaries = demo.diaries.filter((item) => item.user_id !== req.session.user.id);
-    }
-    req.session.destroy(() => res.redirect('/'));
-  } catch (error) { next(error); }
-});
+app.use('/', createPagesRouter());
 
 app.use((req, res) => res.status(404).render('error', { status: 404, message: 'We could not find that page.' }));
 app.use((error, req, res, next) => {

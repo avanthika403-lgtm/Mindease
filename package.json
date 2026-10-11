@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js",
+    "dev": "nodemon server.js",
     "check": "node --check server.js"
   },
   "engines": {
@@ -15,6 +15,7 @@
   "dependencies": {
     "bcryptjs": "^3.0.2",
     "connect-pg-simple": "^10.0.0",
+    "cookie-parser": "^1.4.7",
     "csrf-sync": "^4.2.1",
     "dotenv": "^16.4.7",
     "ejs": "^3.1.10",
@@ -22,6 +23,8 @@
     "express-rate-limit": "^7.5.0",
     "express-session": "^1.18.1",
     "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3",
+    "nodemon": "^3.1.14",
     "otplib": "^13.5.0",
     "pg": "^8.16.3",
     "qrcode": "^1.5.4"
