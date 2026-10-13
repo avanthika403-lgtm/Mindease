@@ -60,6 +60,7 @@ h1, h2, h3 { font-family: var(--font-display); font-weight: 600; line-height: 1.
 .hero-copy .eyebrow { margin-bottom: 20px; }
 .hero-copy h1 { max-width: 650px; margin: 0 0 20px; font-size: clamp(52px, 7vw, 82px); font-weight: 500; line-height: 1.01; }
 .hero-copy h1 em { color: #dce7af; font-family: Georgia, serif; font-weight: 400; }
+.hero-copy h1 { font-family: 'Press Start 2P', monospace; }
 .hero-description { max-width: 455px; margin-bottom: 27px; color: rgba(255,255,255,.84); font-size: 15px; line-height: 1.8; }
 .hero-actions { display: flex; align-items: center; gap: 28px; }
 .hero-note { margin: 25px 0 0; color: rgba(255,255,255,.68); font-size: 11px; }
