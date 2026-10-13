@@ -1,9 +1,23 @@
 const menuButton = document.querySelector('[data-menu-toggle]');
 const sidebar = document.querySelector('#sidebar');
+const backdrop = document.querySelector('#sidebar-backdrop');
+
+function closeSidebar() {
+  sidebar.classList.remove('sidebar-open');
+  backdrop.classList.remove('backdrop-visible');
+  menuButton?.setAttribute('aria-expanded', 'false');
+}
 
 menuButton?.addEventListener('click', () => {
   const open = sidebar.classList.toggle('sidebar-open');
+  backdrop.classList.toggle('backdrop-visible', open);
   menuButton.setAttribute('aria-expanded', String(open));
+});
+
+backdrop?.addEventListener('click', closeSidebar);
+
+sidebar?.querySelectorAll('.side-link, .support-link, .profile-link').forEach((link) => {
+  link.addEventListener('click', closeSidebar);
 });
 
 document.querySelectorAll('[data-confirm]').forEach((form) => {
